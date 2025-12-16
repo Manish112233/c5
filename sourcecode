@@ -1,0 +1,127 @@
+#define F_CPU 8000000UL
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <stdlib.h>
+
+/* ---------- LCD ---------- */
+#define RS PB2
+#define EN PB3
+
+/* ---------- MOTOR ---------- */
+#define IN1 PB0
+#define IN2 PB1
+
+/* ---------- ENCODER ---------- */
+#define PPR 20
+
+volatile uint16_t pulse_count = 0;
+volatile uint8_t one_sec = 0;
+uint16_t rpm = 0;
+
+/* ---------- LCD FUNCTIONS ---------- */
+void lcd_cmd(uint8_t cmd)
+{
+	PORTA = cmd;
+	PORTB &= ~(1<<RS);
+	PORTB |= (1<<EN);
+	_delay_ms(2);
+	PORTB &= ~(1<<EN);
+}
+
+void lcd_data(uint8_t data)
+{
+	PORTA = data;
+	PORTB |= (1<<RS);
+	PORTB |= (1<<EN);
+	_delay_ms(2);
+	PORTB &= ~(1<<EN);
+}
+
+void lcd_init()
+{
+	DDRA = 0xFF;
+	DDRB |= (1<<RS)|(1<<EN);
+	_delay_ms(20);
+	lcd_cmd(0x38);
+	lcd_cmd(0x0C);
+	lcd_cmd(0x01);
+}
+
+/* ---------- ENCODER ISR ---------- */
+ISR(INT0_vect)
+{
+	pulse_count++;
+}
+
+/* ---------- TIMER0 = 1 SECOND ---------- */
+ISR(TIMER0_OVF_vect)
+{
+	static uint16_t cnt = 0;
+	cnt++;
+	if (cnt >= 31)        // ~1 second @ 8MHz, prescaler 1024
+	{
+		one_sec = 1;
+		cnt = 0;
+	}
+}
+
+/* ---------- PWM (TIMER1 ONLY) ---------- */
+void pwm_init()
+{
+	DDRD |= (1<<PD5);                 // OC1A
+	TCCR1A = (1<<COM1A1)|(1<<WGM10);  // Fast PWM 8-bit
+	TCCR1B = (1<<WGM12)|(1<<CS11);    // prescaler 8
+	OCR1A  = 200;                     // speed
+}
+
+/* ---------- MAIN ---------- */
+int main()
+{
+	char buf[16];
+
+	/* Motor direction */
+	DDRB |= (1<<IN1)|(1<<IN2);
+	PORTB |= (1<<IN1);
+	PORTB &= ~(1<<IN2);
+
+	/* LCD */
+	lcd_init();
+	lcd_cmd(0x80);
+	lcd_data('R'); lcd_data('P'); lcd_data('M'); lcd_data(':');
+
+	/* Encoder INT0 */
+	DDRD &= ~(1<<PD2);
+	MCUCR |= (1<<ISC01);
+	GICR  |= (1<<INT0);
+
+	/* Timer0 for 1s */
+	TCCR0 = (1<<CS02)|(1<<CS00);   // prescaler 1024
+	TIMSK |= (1<<TOIE0);
+
+	/* PWM */
+	pwm_init();
+
+	sei();
+
+	while (1)
+	{
+		if (one_sec)
+		{
+			cli();
+			rpm = (pulse_count * 60) / PPR;
+			pulse_count = 0;
+			one_sec = 0;
+			sei();
+
+			lcd_cmd(0xC0);
+			itoa(rpm, buf, 10);
+			lcd_data(' ');
+			lcd_data(' ');
+			lcd_data(' ');
+			lcd_cmd(0xC0);
+			for (uint8_t i=0; buf[i]; i++)
+			lcd_data(buf[i]);
+		}
+	}
+}
